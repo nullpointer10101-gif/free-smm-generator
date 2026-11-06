@@ -1,8 +1,6 @@
 /**
- * generator.js — TGPanel Account Generator Service
- * Runs in Docker with Xvfb & Chromium + Buster extension.
- * Solves reCAPTCHA with Buster audio challenge, registers account on tgpanel.org,
- * and pushes the new account to the main bot's /api/add-accounts endpoint.
+ * generator.js — Turbo Account Generator Service
+ * Exact port of local turbo_single_runner.js for Railway Docker (Xvfb + Chromium + Buster)
  */
 
 'use strict';
@@ -26,10 +24,10 @@ const ADMIN_CHAT_ID    = process.env.ADMIN_CHAT_ID || '';
 const BOT_TOKEN        = process.env.BOT_TOKEN || '';
 
 const BUSTER_PATH      = path.join(__dirname, 'extensions', 'buster');
-const CAPTCHA_TIMEOUT_SEC = 15;
-const MAX_ATTEMPTS_PER_ACC = 5;
+const FAST_CAPTCHA_TIMEOUT_SECONDS = 14;
+const MAX_ATTEMPTS_PER_ACCOUNT = 8;
 
-// Chrome executable detection
+// Chrome detection
 function getChromePath() {
     if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
         return process.env.PUPPETEER_EXECUTABLE_PATH;
@@ -47,7 +45,7 @@ function getChromePath() {
 
 const CHROME_PATH = getChromePath();
 console.log(`[Config] Chrome path: ${CHROME_PATH || 'NOT FOUND'}`);
-console.log(`[Config] Buster extension path: ${BUSTER_PATH} (exists: ${fs.existsSync(BUSTER_PATH)})`);
+console.log(`[Config] Buster extension: ${BUSTER_PATH} (exists: ${fs.existsSync(BUSTER_PATH)})`);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -75,7 +73,7 @@ async function tgNotify(text) {
 
 async function pushAccountsToBot(accounts) {
     if (!BOT_API_URL || !SECRET) {
-        console.log('[Push] BOT_API_URL or GENERATOR_SECRET not configured. Accounts kept local.');
+        console.log('[Push] BOT_API_URL or GENERATOR_SECRET not configured.');
         return false;
     }
     try {
@@ -91,7 +89,7 @@ async function pushAccountsToBot(accounts) {
     }
 }
 
-// ─── Browser Automation Helpers ───────────────────────────────────────────────
+// ─── Browser Automation (Turbo Single Runner Exact Logic) ─────────────────────
 async function hardPurgeEverything(page) {
     try {
         const client = await page.target().createCDPSession();
@@ -109,9 +107,27 @@ async function hardPurgeEverything(page) {
     }
 }
 
+async function is404Page(page) {
+    try {
+        const title = await page.title().catch(() => '');
+        if (title.includes('404')) return true;
+
+        const content = await page.evaluate(() => {
+            const h1 = document.querySelector('h1');
+            return h1 ? h1.innerText : document.body.innerText;
+        }).catch(() => '');
+
+        if (content.includes('404') && content.includes('not found')) {
+            return true;
+        }
+    } catch(e) {}
+    return false;
+}
+
 async function clickRecaptchaCheckbox(page) {
     try {
-        for (const frame of page.frames()) {
+        const frames = page.frames();
+        for (const frame of frames) {
             const isAnchor = frame.url().includes('recaptcha') && (frame.url().includes('anchor') || frame.url().includes('api2'));
             if (isAnchor) {
                 const box = await frame.$('#recaptcha-anchor, .recaptcha-checkbox');
@@ -121,15 +137,15 @@ async function clickRecaptchaCheckbox(page) {
                 }
             }
         }
-    } catch (_) {}
+    } catch(e) {}
     return false;
 }
 
 async function clickBusterButton(page) {
     try {
-        for (const frame of page.frames()) {
-            const isBframe = frame.url().includes('recaptcha') && frame.url().includes('bframe');
-            if (isBframe) {
+        const frames = page.frames();
+        for (const frame of frames) {
+            if (frame.url().includes('recaptcha') && frame.url().includes('bframe')) {
                 const busterBtn = await frame.$('#solver-button, .help-button-holder, .buster-button');
                 if (busterBtn) {
                     await busterBtn.click();
@@ -137,13 +153,14 @@ async function clickBusterButton(page) {
                 }
             }
         }
-    } catch (_) {}
+    } catch(e) {}
     return false;
 }
 
 async function isTryAgainLaterBlocked(page) {
     try {
-        for (const frame of page.frames()) {
+        const frames = page.frames();
+        for (const frame of frames) {
             if (frame.url().includes('recaptcha')) {
                 const text = await frame.content().catch(() => '');
                 if (text.includes('Try again later') || text.includes('automated queries')) {
@@ -151,42 +168,77 @@ async function isTryAgainLaterBlocked(page) {
                 }
             }
         }
-    } catch (_) {}
+    } catch(e) {}
     return false;
 }
 
 async function attemptRegistration(page, creds) {
-    await page.goto('https://tgpanel.org/signup', { waitUntil: 'domcontentloaded', timeout: 20000 });
+    const navResponse = await page.goto('https://tgpanel.org/signup', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
+
+    // Instant 404 detection via HTTP status code or page content
+    if ((navResponse && navResponse.status() === 404) || (await is404Page(page))) {
+        process.stdout.write('[404 Instant Reset] ');
+        await hardPurgeEverything(page);
+        return { success: false, timeout: true };
+    }
 
     if (!page.url().includes('/signup')) {
         await hardPurgeEverything(page);
-        await page.goto('https://tgpanel.org/signup', { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.goto('https://tgpanel.org/signup', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
+        if (await is404Page(page)) {
+            process.stdout.write('[404 Instant Reset] ');
+            return { success: false, timeout: true };
+        }
     }
 
-    await page.waitForSelector('input[name="RegistrationForm[login]"]', { timeout: 10000 });
+    try {
+        await page.waitForSelector('input[name="RegistrationForm[login]"]', { timeout: 4000 });
+    } catch(e) {
+        if (await is404Page(page)) {
+            process.stdout.write('[404 Instant Reset] ');
+            await hardPurgeEverything(page);
+            return { success: false, timeout: true };
+        }
+        throw e;
+    }
 
-    await page.type('input[name="RegistrationForm[login]"]', creds.username, { delay: 5 });
-    await page.type('input[name="RegistrationForm[email]"]', creds.email, { delay: 5 });
-    await page.type('input[name="RegistrationForm[password]"]', creds.password, { delay: 5 });
-    await page.type('input[name="RegistrationForm[password_again]"]', creds.password, { delay: 5 });
+    // Direct in-DOM instant population (0ms delay)
+    await page.evaluate((c) => {
+        const set = (name, val) => {
+            const el = document.querySelector(`input[name="RegistrationForm[${name}]"]`);
+            if (el) {
+                el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        };
+        set('login', c.username);
+        set('email', c.email);
+        set('password', c.password);
+        set('password_again', c.password);
 
-    // Click submit/signup button
-    await page.evaluate(() => {
         const btn = document.querySelector('.signup-buttons button') ||
                     document.querySelector('form button[type="submit"]') ||
                     document.querySelector('.btn-primary');
         if (btn) btn.click();
-    }).catch(() => {});
+    }, creds);
 
-    const startTime = Date.now();
+    const clickTime = Date.now();
     let clickedCheckbox = false;
     let clickedBuster = false;
     let submitted = false;
 
-    while (Date.now() - startTime < (CAPTCHA_TIMEOUT_SEC * 1000)) {
-        await sleep(600);
+    while (Date.now() - clickTime < (FAST_CAPTCHA_TIMEOUT_SECONDS * 1000)) {
+        await sleep(150);
 
         const currentUrl = page.url();
+
+        if (await is404Page(page)) {
+            process.stdout.write('[404 Instant Reset] ');
+            await hardPurgeEverything(page);
+            return { success: false, timeout: true };
+        }
+
         if (!currentUrl.includes('/signup')) {
             return { success: true, url: currentUrl };
         }
@@ -197,16 +249,17 @@ async function attemptRegistration(page, creds) {
         }
 
         if (await isTryAgainLaterBlocked(page)) {
-            console.log('[Block] Google displayed "Try again later". Purging session...');
             return { success: false, timeout: true };
         }
 
         if (!clickedCheckbox) {
-            if (await clickRecaptchaCheckbox(page)) clickedCheckbox = true;
+            const ok = await clickRecaptchaCheckbox(page);
+            if (ok) clickedCheckbox = true;
         }
 
         if (!clickedBuster) {
-            if (await clickBusterButton(page)) clickedBuster = true;
+            const bOk = await clickBusterButton(page);
+            if (bOk) clickedBuster = true;
         }
 
         const isSolved = await page.evaluate(() => {
@@ -215,18 +268,17 @@ async function attemptRegistration(page, creds) {
         }).catch(() => false);
 
         if (isSolved && !submitted) {
-            console.log('[Solved] CAPTCHA cleared! Submitting registration...');
             await page.evaluate(() => {
                 const btn = document.querySelector('.signup-buttons button') ||
                             document.querySelector('form button[type="submit"]');
                 if (btn) btn.click();
             }).catch(() => {});
             submitted = true;
-            await sleep(1500);
+            await sleep(800);
         }
     }
 
-    if (!page.url().includes('/signup')) {
+    if (!page.url().includes('/signup') && !(await is404Page(page))) {
         return { success: true, url: page.url() };
     }
 
@@ -236,28 +288,30 @@ async function attemptRegistration(page, creds) {
 async function createOneAccount(page) {
     const creds = generateCredentials();
     console.log(`\n----------------------------------------`);
-    console.log(`[Account] Creating: ${creds.username} (${creds.email})`);
+    console.log(`[Target] ${creds.username} (${creds.email})`);
 
     await hardPurgeEverything(page);
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_ACC; attempt++) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_ACCOUNT; attempt++) {
         try {
             const res = await attemptRegistration(page, creds);
             if (res.success) {
-                console.log(`[SUCCESS] Registered: ${creds.username}`);
+                console.log(`\n⚡ [SUCCESS] Registered: ${creds.username}`);
                 return { success: true, ...creds };
             }
+
             if (res.timeout) {
-                console.log(`[RateLimit] Waiting 8s for reCAPTCHA cooldown...`);
+                process.stdout.write('↺ ');
                 await hardPurgeEverything(page);
-                await sleep(8000);
+                await sleep(300);
             }
         } catch (e) {
-            console.log(`[WARN] Attempt ${attempt} failed: ${e.message}`);
             await hardPurgeEverything(page);
-            await sleep(3000);
+            await sleep(300);
         }
     }
+
+    console.log(`\n❌ [Skipped] Could not register ${creds.username}`);
     return { success: false, username: creds.username };
 }
 
@@ -274,20 +328,23 @@ async function runGeneratorTask(count) {
     console.log(`[Job Started] Target: ${count} accounts`);
     console.log(`========================================`);
 
-    await tgNotify(`🚀 <b>TGPanel Account Generator Started</b>\nTarget: <b>${count}</b> fresh accounts`);
+    await tgNotify(`🚀 <b>Generator Task Started</b>\nTarget: <b>${count}</b> fresh accounts`);
 
     let browser = null;
     const createdAccounts = [];
 
     try {
-        if (!CHROME_PATH) throw new Error('No Chromium/Chrome executable found on system.');
+        if (!CHROME_PATH) throw new Error('No Chromium executable found.');
 
         const launchArgs = [
+            '--start-maximized',
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
             '--disable-blink-features=AutomationControlled',
-            '--window-size=1280,800',
+            '--disable-session-crashed-bubble',
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--blink-settings=imagesEnabled=true'
         ];
 
         if (fs.existsSync(BUSTER_PATH)) {
@@ -297,23 +354,19 @@ async function runGeneratorTask(count) {
 
         browser = await puppeteer.launch({
             executablePath: CHROME_PATH,
-            headless: false, // Display is handled by Xvfb virtual frame buffer
-            defaultViewport: { width: 1280, height: 800 },
+            headless: false,
+            defaultViewport: null,
             ignoreDefaultArgs: ['--disable-extensions', '--enable-automation'],
             args: launchArgs
         });
 
         const pages = await browser.pages();
         const page = pages.length > 0 ? pages[0] : await browser.newPage();
-
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        });
+        await page.bringToFront().catch(() => {});
 
         for (let i = 0; i < count; i++) {
             _jobProgress.current = i + 1;
-            console.log(`\n>>> Progress: ${i + 1}/${count} (Created: ${createdAccounts.length})`);
+            console.log(`\n>>> Processing ${i + 1}/${count} (Created: ${createdAccounts.length})`);
 
             const res = await createOneAccount(page);
             if (res.success) {
@@ -321,7 +374,7 @@ async function runGeneratorTask(count) {
                 const acc = { username: res.username, email: res.email, password: res.password };
                 createdAccounts.push(acc);
 
-                // Push each account immediately to bot
+                // Push immediately to main bot
                 await pushAccountsToBot([acc]);
             } else {
                 _jobProgress.failed++;
@@ -329,7 +382,7 @@ async function runGeneratorTask(count) {
 
             if (i < count - 1) {
                 await hardPurgeEverything(page);
-                await sleep(2000);
+                await sleep(300);
             }
         }
 
@@ -350,7 +403,6 @@ async function runGeneratorTask(count) {
 const app = express();
 app.use(express.json());
 
-// 1. Health check
 app.get('/', (req, res) => {
     res.json({
         service: 'free-smm-generator',
@@ -360,7 +412,6 @@ app.get('/', (req, res) => {
     });
 });
 
-// 2. Start generation: POST /generate or GET /generate?secret=...&count=10
 app.all('/generate', (req, res) => {
     const body = req.method === 'POST' ? req.body : {};
     const secret = body.secret || req.query.secret;
@@ -382,7 +433,6 @@ app.all('/generate', (req, res) => {
         });
     }
 
-    // Launch async
     runGeneratorTask(count).catch(err => console.error('[Fatal]', err));
 
     res.json({
@@ -392,7 +442,6 @@ app.all('/generate', (req, res) => {
     });
 });
 
-// 3. Status check
 app.get('/status', (req, res) => {
     res.json({
         jobRunning: _jobRunning,
