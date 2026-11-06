@@ -1,0 +1,18 @@
+{
+  "name": "free-smm-generator",
+  "version": "1.0.0",
+  "description": "Headless account generator service for TGPanel with Buster extension & Xvfb",
+  "main": "generator.js",
+  "scripts": {
+    "start": "node generator.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "puppeteer-core": "^22.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
