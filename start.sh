@@ -11,3 +11,4 @@ sleep 2
 
 echo "[Init] Xvfb started (PID: $XVFB_PID). Launching Node generator on port ${PORT:-3001}..."
 exec node generator.js
+

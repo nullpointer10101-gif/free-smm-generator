@@ -375,12 +375,25 @@ async function runGeneratorTask(count) {
         });
 
         const pages = await browser.pages();
-        const page = pages.length > 0 ? pages[0] : await browser.newPage();
+        let page = pages.length > 0 ? pages[0] : await browser.newPage();
         await page.bringToFront().catch(() => {});
 
         for (let i = 0; i < count; i++) {
             _jobProgress.current = i + 1;
             console.log(`\n>>> Processing ${i + 1}/${count} (Created: ${createdAccounts.length})`);
+
+            // Periodic memory cleanup every 50 accounts for long 1000-account runs
+            if (i > 0 && i % 50 === 0) {
+                try {
+                    console.log(`[Maintenance] Refreshing browser tab to free memory (${i}/${count})...`);
+                    const freshPage = await browser.newPage();
+                    await page.close().catch(() => {});
+                    page = freshPage;
+                    await page.bringToFront().catch(() => {});
+                } catch (e) {
+                    console.log(`[Maintenance] Page refresh note: ${e.message}`);
+                }
+            }
 
             const res = await createOneAccount(page);
             if (res.success) {
@@ -435,8 +448,8 @@ app.all('/generate', (req, res) => {
         return res.status(401).json({ status: 'error', message: 'Unauthorized. Check GENERATOR_SECRET.' });
     }
 
-    if (count < 1 || count > 100) {
-        return res.status(400).json({ status: 'error', message: 'count must be between 1 and 100' });
+    if (count < 1 || count > 1000) {
+        return res.status(400).json({ status: 'error', message: 'count must be between 1 and 1000' });
     }
 
     if (_jobRunning) {
