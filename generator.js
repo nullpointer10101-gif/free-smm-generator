@@ -249,7 +249,7 @@ async function attemptRegistration(page, creds) {
         }
 
         if (await isTryAgainLaterBlocked(page)) {
-            return { success: false, timeout: true };
+            return { success: false, rateLimited: true, timeout: true };
         }
 
         if (!clickedCheckbox) {
@@ -292,6 +292,7 @@ async function createOneAccount(page) {
 
     await hardPurgeEverything(page);
 
+    let consecutiveBlocks = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_ACCOUNT; attempt++) {
         try {
             const res = await attemptRegistration(page, creds);
@@ -300,14 +301,27 @@ async function createOneAccount(page) {
                 return { success: true, ...creds };
             }
 
+            if (res.rateLimited) {
+                consecutiveBlocks++;
+                if (consecutiveBlocks >= 2) {
+                    console.log(`\n⏳ [Google Cooldown] Temporary rate limit on IP. Pausing 45s for reset...`);
+                    await hardPurgeEverything(page);
+                    await sleep(45000);
+                    consecutiveBlocks = 0;
+                    continue;
+                }
+            } else {
+                consecutiveBlocks = 0;
+            }
+
             if (res.timeout) {
                 process.stdout.write('↺ ');
                 await hardPurgeEverything(page);
-                await sleep(300);
+                await sleep(1200);
             }
         } catch (e) {
             await hardPurgeEverything(page);
-            await sleep(300);
+            await sleep(1000);
         }
     }
 
