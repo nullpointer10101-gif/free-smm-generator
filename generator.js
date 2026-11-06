@@ -18,7 +18,10 @@ const crypto = require('crypto');
 // ─── Environment & Config ─────────────────────────────────────────────────────
 const PORT             = process.env.PORT || 3001;
 const SECRET           = process.env.GENERATOR_SECRET || '';
-const BOT_API_URL      = (process.env.BOT_API_URL || '').replace(/\/$/, '');
+let BOT_API_URL        = (process.env.BOT_API_URL || '').trim().replace(/\/$/, '');
+if (BOT_API_URL && !BOT_API_URL.startsWith('http://') && !BOT_API_URL.startsWith('https://')) {
+    BOT_API_URL = 'https://' + BOT_API_URL;
+}
 const ADMIN_CHAT_ID    = process.env.ADMIN_CHAT_ID || '';
 const BOT_TOKEN        = process.env.BOT_TOKEN || '';
 
@@ -245,13 +248,14 @@ async function createOneAccount(page) {
                 return { success: true, ...creds };
             }
             if (res.timeout) {
+                console.log(`[RateLimit] Waiting 8s for reCAPTCHA cooldown...`);
                 await hardPurgeEverything(page);
-                await sleep(1000);
+                await sleep(8000);
             }
         } catch (e) {
             console.log(`[WARN] Attempt ${attempt} failed: ${e.message}`);
             await hardPurgeEverything(page);
-            await sleep(1000);
+            await sleep(3000);
         }
     }
     return { success: false, username: creds.username };
@@ -302,6 +306,11 @@ async function runGeneratorTask(count) {
         const pages = await browser.pages();
         const page = pages.length > 0 ? pages[0] : await browser.newPage();
 
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        });
+
         for (let i = 0; i < count; i++) {
             _jobProgress.current = i + 1;
             console.log(`\n>>> Progress: ${i + 1}/${count} (Created: ${createdAccounts.length})`);
@@ -312,25 +321,16 @@ async function runGeneratorTask(count) {
                 const acc = { username: res.username, email: res.email, password: res.password };
                 createdAccounts.push(acc);
 
-                // Push in small batches of 3 or at the end so main bot gets them quickly
-                if (createdAccounts.length % 3 === 0 || i === count - 1) {
-                    const batch = createdAccounts.slice(Math.max(0, createdAccounts.length - 3));
-                    await pushAccountsToBot(batch);
-                }
+                // Push each account immediately to bot
+                await pushAccountsToBot([acc]);
             } else {
                 _jobProgress.failed++;
             }
 
             if (i < count - 1) {
                 await hardPurgeEverything(page);
-                await sleep(1000);
+                await sleep(2000);
             }
-        }
-
-        // Final push
-        if (createdAccounts.length > 0 && createdAccounts.length % 3 !== 0) {
-            const remainder = createdAccounts.length % 3;
-            await pushAccountsToBot(createdAccounts.slice(-remainder));
         }
 
     } catch (err) {
