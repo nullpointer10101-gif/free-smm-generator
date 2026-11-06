@@ -61,6 +61,8 @@ RUN npm install --production
 
 COPY . .
 
+RUN chmod +x start.sh
+
 EXPOSE 3001
 
-CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x800x24", "node", "generator.js"]
+CMD ["./start.sh"]

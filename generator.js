@@ -400,7 +400,7 @@ app.get('/status', (req, res) => {
     });
 });
 
-app.listen(PORT, () => {
-    console.log(`[HTTP] Generator server listening on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[HTTP] Generator server listening on 0.0.0.0:${PORT}`);
     console.log(`[HTTP] Connected bot URL: ${BOT_API_URL || '(none)'}`);
 });
