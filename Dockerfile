@@ -1,10 +1,11 @@
 FROM node:20-bookworm-slim
 
-# Install Chromium, Xvfb, fonts, ca-certificates, curl, unzip, and display libraries
+# Install Chromium, Xvfb, xauth, fonts, ca-certificates, curl, unzip, and display libraries
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     chromium \
     xvfb \
+    xauth \
     x11-utils \
     curl \
     unzip \
@@ -49,7 +50,7 @@ ENV DISPLAY=:99
 
 WORKDIR /app
 
-# Download official Buster extension release directly (using ca-certificates + -k fallback)
+# Download official Buster extension release directly
 RUN mkdir -p /app/extensions/buster && \
     curl -k -fsSL https://github.com/dessant/buster/releases/download/v3.4.0/buster_captcha_solver_for_humans-3.4.0-chrome.zip -o /tmp/buster.zip && \
     unzip -q /tmp/buster.zip -d /app/extensions/buster && \
