@@ -292,7 +292,6 @@ async function createOneAccount(page) {
 
     await hardPurgeEverything(page);
 
-    let consecutiveBlocks = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_ACCOUNT; attempt++) {
         try {
             const res = await attemptRegistration(page, creds);
@@ -302,26 +301,19 @@ async function createOneAccount(page) {
             }
 
             if (res.rateLimited) {
-                consecutiveBlocks++;
-                if (consecutiveBlocks >= 2) {
-                    console.log(`\n⏳ [Google Cooldown] Temporary rate limit on IP. Pausing 45s for reset...`);
-                    await hardPurgeEverything(page);
-                    await sleep(45000);
-                    consecutiveBlocks = 0;
-                    continue;
-                }
-            } else {
-                consecutiveBlocks = 0;
+                // If Google blocks the IP with "Try again later", don't hammer the IP with repeated attempts
+                console.log(`\n⚠️ [Google Rate Limit] "Try again later" detected on IP.`);
+                return { success: false, rateLimited: true, username: creds.username };
             }
 
             if (res.timeout) {
                 process.stdout.write('↺ ');
                 await hardPurgeEverything(page);
-                await sleep(1200);
+                await sleep(1500);
             }
         } catch (e) {
             await hardPurgeEverything(page);
-            await sleep(1000);
+            await sleep(1200);
         }
     }
 
@@ -331,11 +323,13 @@ async function createOneAccount(page) {
 
 // ─── Job State & Worker ───────────────────────────────────────────────────────
 let _jobRunning = false;
+let _stopRequested = false;
 let _jobProgress = { target: 0, created: 0, failed: 0, current: 0 };
 
 async function runGeneratorTask(count) {
     if (_jobRunning) return;
     _jobRunning = true;
+    _stopRequested = false;
     _jobProgress = { target: count, created: 0, failed: 0, current: 0 };
 
     console.log(`\n========================================`);
@@ -346,6 +340,7 @@ async function runGeneratorTask(count) {
 
     let browser = null;
     const createdAccounts = [];
+    let consecutiveBlocks = 0;
 
     try {
         if (!CHROME_PATH) throw new Error('No Chromium executable found.');
@@ -379,6 +374,11 @@ async function runGeneratorTask(count) {
         await page.bringToFront().catch(() => {});
 
         for (let i = 0; i < count; i++) {
+            if (_stopRequested) {
+                console.log(`\n🛑 [Job Stopped] Abort requested by user.`);
+                break;
+            }
+
             _jobProgress.current = i + 1;
             console.log(`\n>>> Processing ${i + 1}/${count} (Created: ${createdAccounts.length})`);
 
@@ -397,19 +397,39 @@ async function runGeneratorTask(count) {
 
             const res = await createOneAccount(page);
             if (res.success) {
+                consecutiveBlocks = 0; // reset block counter
                 _jobProgress.created++;
                 const acc = { username: res.username, email: res.email, password: res.password };
                 createdAccounts.push(acc);
 
                 // Push immediately to main bot
                 await pushAccountsToBot([acc]);
+
+                // Natural human pacing between accounts (2.5 - 4.5s) to avoid triggering IP blocks
+                if (i < count - 1) {
+                    await hardPurgeEverything(page);
+                    const pauseMs = 2500 + Math.floor(Math.random() * 2000);
+                    await sleep(pauseMs);
+                }
             } else {
                 _jobProgress.failed++;
-            }
 
-            if (i < count - 1) {
-                await hardPurgeEverything(page);
-                await sleep(300);
+                if (res.rateLimited) {
+                    consecutiveBlocks++;
+                    if (consecutiveBlocks >= 3) {
+                        console.log(`\n🛑 [Google IP Lock] Cloud IP received 3 consecutive rate limits from Google.`);
+                        console.log(`Stopping job gracefully so Google IP cooldown can clear.`);
+                        await tgNotify(`⚠️ <b>Generator Cooldown:</b> Google flagged the Railway cloud IP after creating <b>${createdAccounts.length}</b> accounts.\n\nJob paused to let IP cooldown. Use local CMD generator or retry later.`);
+                        break;
+                    }
+                    const waitSec = consecutiveBlocks === 1 ? 90 : 180;
+                    console.log(`\n⏳ [Google Cooldown #${consecutiveBlocks}] Pausing ${waitSec}s for Google IP rate limit reset...`);
+                    await hardPurgeEverything(page);
+                    await sleep(waitSec * 1000);
+                } else if (i < count - 1) {
+                    await hardPurgeEverything(page);
+                    await sleep(1500);
+                }
             }
         }
 
@@ -421,6 +441,7 @@ async function runGeneratorTask(count) {
             try { await browser.close(); } catch (_) {}
         }
         _jobRunning = false;
+        _stopRequested = false;
         console.log(`\n[Job Completed] Created: ${createdAccounts.length}/${count}`);
         await tgNotify(`🏁 <b>Generator Completed!</b>\nCreated: <b>${createdAccounts.length}</b>\nFailed: <b>${_jobProgress.failed}</b>`);
     }
@@ -466,6 +487,26 @@ app.all('/generate', (req, res) => {
         status: 'started',
         message: `Started generating ${count} accounts. Accounts will be pushed to main bot as they are ready.`,
         target: count
+    });
+});
+
+app.all('/stop', (req, res) => {
+    const body = req.method === 'POST' ? req.body : {};
+    const secret = body.secret || req.query.secret;
+
+    if (!SECRET || secret !== SECRET) {
+        return res.status(401).json({ status: 'error', message: 'Unauthorized. Check GENERATOR_SECRET.' });
+    }
+
+    if (!_jobRunning) {
+        return res.json({ status: 'idle', message: 'No generation job is currently running.' });
+    }
+
+    _stopRequested = true;
+    res.json({
+        status: 'stopping',
+        message: 'Stopping generation job gracefully...',
+        progress: _jobProgress
     });
 });
 
