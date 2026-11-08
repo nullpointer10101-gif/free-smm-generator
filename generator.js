@@ -165,6 +165,22 @@ async function clickBusterButton(page) {
     return false;
 }
 
+async function clickReloadCaptchaButton(page) {
+    try {
+        const frames = page.frames();
+        for (const frame of frames) {
+            if (frame.url().includes('recaptcha') && frame.url().includes('bframe')) {
+                const reloadBtn = await frame.$('#recaptcha-reload-button, .rc-button-reload');
+                if (reloadBtn) {
+                    await reloadBtn.click();
+                    return true;
+                }
+            }
+        }
+    } catch(e) {}
+    return false;
+}
+
 async function isTryAgainLaterBlocked(page) {
     try {
         const frames = page.frames();
@@ -233,7 +249,7 @@ async function attemptRegistration(page, creds) {
 
     const clickTime = Date.now();
     let clickedCheckbox = false;
-    let clickedBuster = false;
+    let lastBusterClick = 0;
     let submitted = false;
 
     while (Date.now() - clickTime < (FAST_CAPTCHA_TIMEOUT_SECONDS * 1000)) {
@@ -257,7 +273,14 @@ async function attemptRegistration(page, creds) {
         }
 
         if (await isTryAgainLaterBlocked(page)) {
-            return { success: false, rateLimited: true, timeout: true };
+            const reloaded = await clickReloadCaptchaButton(page);
+            if (reloaded) {
+                process.stdout.write('🔄 ');
+                await sleep(800);
+            }
+            if (await isTryAgainLaterBlocked(page)) {
+                return { success: false, rateLimited: true, timeout: true };
+            }
         }
 
         if (!clickedCheckbox) {
@@ -265,9 +288,9 @@ async function attemptRegistration(page, creds) {
             if (ok) clickedCheckbox = true;
         }
 
-        if (!clickedBuster) {
+        if (Date.now() - lastBusterClick > 1200) {
             const bOk = await clickBusterButton(page);
-            if (bOk) clickedBuster = true;
+            if (bOk) lastBusterClick = Date.now();
         }
 
         const isSolved = await page.evaluate(() => {
@@ -309,9 +332,13 @@ async function createOneAccount(page) {
             }
 
             if (res.rateLimited) {
-                // If Google blocks the IP with "Try again later", don't hammer the IP with repeated attempts
-                console.log(`\n⚠️ [Google Rate Limit] "Try again later" detected on IP.`);
-                return { success: false, rateLimited: true, username: creds.username };
+                process.stdout.write(`↺[RateLimit #${attempt}] `);
+                await hardPurgeEverything(page);
+                await sleep(1000);
+                if (attempt >= 2) {
+                    return { success: false, rateLimited: true, username: creds.username };
+                }
+                continue;
             }
 
             if (res.timeout) {
@@ -381,19 +408,23 @@ async function runGeneratorTask(count) {
         let page = pages.length > 0 ? pages[0] : await browser.newPage();
         await page.bringToFront().catch(() => {});
 
-        for (let i = 0; i < count; i++) {
+        let attemptCount = 0;
+        const maxAttempts = count * 4;
+
+        while (createdAccounts.length < count && attemptCount < maxAttempts) {
             if (_stopRequested) {
                 console.log(`\n🛑 [Job Stopped] Abort requested by user.`);
                 break;
             }
 
-            _jobProgress.current = i + 1;
-            console.log(`\n>>> Processing ${i + 1}/${count} (Created: ${createdAccounts.length})`);
+            attemptCount++;
+            _jobProgress.current = createdAccounts.length + 1;
+            console.log(`\n>>> Progress: ${createdAccounts.length}/${count} Target Accounts (Attempt #${attemptCount})`);
 
-            // Periodic memory cleanup every 50 accounts for long 1000-account runs
-            if (i > 0 && i % 50 === 0) {
+            // Periodic memory cleanup every 25 attempts
+            if (attemptCount > 0 && attemptCount % 25 === 0) {
                 try {
-                    console.log(`[Maintenance] Refreshing browser tab to free memory (${i}/${count})...`);
+                    console.log(`[Maintenance] Refreshing browser tab to free memory...`);
                     const freshPage = await browser.newPage();
                     await page.close().catch(() => {});
                     page = freshPage;
@@ -413,10 +444,9 @@ async function runGeneratorTask(count) {
                 // Push immediately to main bot
                 await pushAccountsToBot([acc]);
 
-                // Natural human pacing between accounts (2.5 - 4.5s) to avoid triggering IP blocks
-                if (i < count - 1) {
+                if (createdAccounts.length < count) {
                     await hardPurgeEverything(page);
-                    const pauseMs = 2500 + Math.floor(Math.random() * 2000);
+                    const pauseMs = 1500 + Math.floor(Math.random() * 1000);
                     await sleep(pauseMs);
                 }
             } else {
@@ -430,10 +460,10 @@ async function runGeneratorTask(count) {
                         page = await browser.newPage();
                         await oldPage.close().catch(() => {});
                     } catch (_) {}
-                    await sleep(2000);
-                } else if (i < count - 1) {
+                    await sleep(1500);
+                } else if (createdAccounts.length < count) {
                     await hardPurgeEverything(page);
-                    await sleep(1200);
+                    await sleep(1000);
                 }
             }
         }
