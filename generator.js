@@ -97,22 +97,29 @@ async function hardPurgeEverything(page) {
             origin: 'https://tgpanel.org',
             storageTypes: 'all'
         });
-        await client.send('Storage.clearDataForOrigin', {
-            origin: 'https://www.google.com',
-            storageTypes: 'all'
-        });
-        await client.send('Storage.clearDataForOrigin', {
-            origin: 'https://recaptcha.net',
-            storageTypes: 'all'
-        });
-        await client.send('Network.clearBrowserCookies');
-        await client.send('Network.clearBrowserCache');
+        const tgCookies = await page.cookies('https://tgpanel.org');
+        if (tgCookies && tgCookies.length > 0) {
+            await page.deleteCookie(...tgCookies);
+        }
     } catch (e) {
         await page.evaluate(() => {
             try { localStorage.clear(); } catch(e) {}
             try { sessionStorage.clear(); } catch(e) {}
         }).catch(() => {});
     }
+}
+
+async function isRecaptchaChecked(page) {
+    try {
+        const frames = page.frames();
+        for (const frame of frames) {
+            if (frame.url().includes('recaptcha') && (frame.url().includes('anchor') || frame.url().includes('api2'))) {
+                const checked = await frame.$('.recaptcha-checkbox-checked, [aria-checked="true"]');
+                if (checked) return true;
+            }
+        }
+    } catch(e) {}
+    return false;
 }
 
 async function is404Page(page) {
@@ -298,14 +305,17 @@ async function attemptRegistration(page, creds) {
             return gr && gr.value && gr.value.trim().length > 20;
         }).catch(() => false);
 
-        if (isSolved && !submitted) {
+        const isChecked = await isRecaptchaChecked(page);
+
+        if ((isSolved || isChecked) && !submitted) {
             await page.evaluate(() => {
                 const btn = document.querySelector('.signup-buttons button') ||
                             document.querySelector('form button[type="submit"]');
                 if (btn) btn.click();
             }).catch(() => {});
             submitted = true;
-            await sleep(800);
+            process.stdout.write('⚡[1-Click Solved] ');
+            await sleep(600);
         }
     }
 
@@ -454,20 +464,14 @@ async function runGeneratorTask(count) {
 
                 if (res.rateLimited) {
                     consecutiveBlocks++;
-                    if (consecutiveBlocks >= 5) {
-                        console.log(`\n🛑 [Google IP Lock] Cloud IP received 5 consecutive rate limits from Google.`);
-                        console.log(`Stopping job gracefully so Google IP cooldown can clear.`);
-                        await tgNotify(`⚠️ <b>Generator Cooldown:</b> Google rate-limited the Railway cloud IP after creating <b>${createdAccounts.length}</b> accounts.\n\nJob stopped to let IP cool down. Run your local generator or retry later.`);
-                        break;
-                    }
-                    console.log(`\n⚡ [Instant Reset #${consecutiveBlocks}/5] Rate limit detected — clearing all storage & switching to fresh session...`);
+                    console.log(`\n⚡ [Instant Reset] Rate limit detected — clearing all storage & switching to fresh session...`);
                     await hardPurgeEverything(page);
                     try {
                         const oldPage = page;
                         page = await browser.newPage();
                         await oldPage.close().catch(() => {});
                     } catch (_) {}
-                    await sleep(3000);
+                    await sleep(2000);
                 } else if (createdAccounts.length < count) {
                     await hardPurgeEverything(page);
                     await sleep(1000);
