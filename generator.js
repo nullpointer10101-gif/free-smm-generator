@@ -453,14 +453,21 @@ async function runGeneratorTask(count) {
                 _jobProgress.failed++;
 
                 if (res.rateLimited) {
-                    console.log(`\n⚡ [Instant Reset] Rate limit detected — clearing all storage & switching to fresh session...`);
+                    consecutiveBlocks++;
+                    if (consecutiveBlocks >= 5) {
+                        console.log(`\n🛑 [Google IP Lock] Cloud IP received 5 consecutive rate limits from Google.`);
+                        console.log(`Stopping job gracefully so Google IP cooldown can clear.`);
+                        await tgNotify(`⚠️ <b>Generator Cooldown:</b> Google rate-limited the Railway cloud IP after creating <b>${createdAccounts.length}</b> accounts.\n\nJob stopped to let IP cool down. Run your local generator or retry later.`);
+                        break;
+                    }
+                    console.log(`\n⚡ [Instant Reset #${consecutiveBlocks}/5] Rate limit detected — clearing all storage & switching to fresh session...`);
                     await hardPurgeEverything(page);
                     try {
                         const oldPage = page;
                         page = await browser.newPage();
                         await oldPage.close().catch(() => {});
                     } catch (_) {}
-                    await sleep(1500);
+                    await sleep(3000);
                 } else if (createdAccounts.length < count) {
                     await hardPurgeEverything(page);
                     await sleep(1000);
