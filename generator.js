@@ -97,6 +97,14 @@ async function hardPurgeEverything(page) {
             origin: 'https://tgpanel.org',
             storageTypes: 'all'
         });
+        await client.send('Storage.clearDataForOrigin', {
+            origin: 'https://www.google.com',
+            storageTypes: 'all'
+        });
+        await client.send('Storage.clearDataForOrigin', {
+            origin: 'https://recaptcha.net',
+            storageTypes: 'all'
+        });
         await client.send('Network.clearBrowserCookies');
         await client.send('Network.clearBrowserCache');
     } catch (e) {
@@ -415,20 +423,17 @@ async function runGeneratorTask(count) {
                 _jobProgress.failed++;
 
                 if (res.rateLimited) {
-                    consecutiveBlocks++;
-                    if (consecutiveBlocks >= 3) {
-                        console.log(`\n🛑 [Google IP Lock] Cloud IP received 3 consecutive rate limits from Google.`);
-                        console.log(`Stopping job gracefully so Google IP cooldown can clear.`);
-                        await tgNotify(`⚠️ <b>Generator Cooldown:</b> Google flagged the Railway cloud IP after creating <b>${createdAccounts.length}</b> accounts.\n\nJob paused to let IP cooldown. Use local CMD generator or retry later.`);
-                        break;
-                    }
-                    const waitSec = consecutiveBlocks === 1 ? 90 : 180;
-                    console.log(`\n⏳ [Google Cooldown #${consecutiveBlocks}] Pausing ${waitSec}s for Google IP rate limit reset...`);
+                    console.log(`\n⚡ [Instant Reset] Rate limit detected — clearing all storage & switching to fresh session...`);
                     await hardPurgeEverything(page);
-                    await sleep(waitSec * 1000);
+                    try {
+                        const oldPage = page;
+                        page = await browser.newPage();
+                        await oldPage.close().catch(() => {});
+                    } catch (_) {}
+                    await sleep(2000);
                 } else if (i < count - 1) {
                     await hardPurgeEverything(page);
-                    await sleep(1500);
+                    await sleep(1200);
                 }
             }
         }
